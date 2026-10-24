@@ -7,6 +7,17 @@ RepairCalc — микросервис для расчёта ремонта и п
 
 Сервисы запускаются в Docker и общаются по HTTP внутри Docker-сети. API приложения будет доступно внешним клиентам.
 
+## Загрузка новой JSON-выгрузки в PostgreSQL
+
+```sh
+./scripts/import_products_json.sh
+```
+
+Потоково читает `products_final.json` и атомарно заменяет схему и данные
+`public.products` в БД `repaircalc`. Адрес БД задаётся через `DATABASE_URL`
+или вторым аргументом скрипта. Подробности формата и схемы — в
+[parser/README.md](parser/README.md).
+
 ## Интеграция с каталогом Максидома
 
 Модуль `repair_calc::catalog` использует существующие модели `src/models/`.
