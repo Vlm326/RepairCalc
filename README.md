@@ -103,8 +103,8 @@ println!("{} products", snapshot.products.len());
 
 Отдельные методы клиента: `category_tree`, `categories`, `products_page`,
 `products` (все страницы), `product`, `regions`. Снимок можно прочитать через
-`CatalogSnapshot::load`. Хранение в PostgreSQL и REST-ручки приложения в этот
-модуль не входят; его можно вызвать из будущего сервиса синхронизации.
+`CatalogSnapshot::load`. Хранение в PostgreSQL вынесено в отдельный модуль `storage` (см. ниже).
+REST-ручки и запись снимка в БД этот модуль не выполняет.
 
 Проверки на локальном HTTP-стенде без обращения к внешнему API:
 
@@ -116,3 +116,99 @@ cargo clippy --all-targets -- -D warnings
 Тесты проверяют параметры всех пяти ручек, пагинацию, загрузку карточек,
 дедупликацию, обновление снимка, сохранность прежнего файла при сбое,
 HTTP-ошибки, повторы, таймауты, неверные ответы, локаль и авторизацию.
+
+## PostgreSQL: каталог и CRUD
+
+`repair_calc::storage::CatalogStore` работает через sqlx 0.9 (Rust 1.94+).
+Миграции встроены в бинарник. Для новой БД создайте базу `repaircalc`
+и передайте строку подключения через окружение (замените `vlm326` на вашу роль):
+
+```sh
+export DATABASE_URL='postgresql://vlm326@localhost/repaircalc?host=/run/postgresql'
+cargo run --bin catalog-migrate
+```
+
+Миграция создаёт отдельную схему `catalog`; существующая `public.products`
+и JSON-импорт не меняются. Импорт в нормализованный каталог выполняется
+потребителем через `CatalogStore`: автоматической синхронизации этих схем нет.
+
+Таблицы: `products`, `categories`, связь `product_categories` (многие ко многим),
+справочник `characteristics`, значения `product_characteristics`, текущие `prices`
+по товару/региону/валюте и `stocks` по товару/региону/складу.
+Категории плоские. Характеристики имеют строковые значения и необязательную единицу.
+Цена задана за упаковку, остаток — в упаковках; `package_quantity` — объём
+материала в упаковке в единицах `unit`. Деньги: `NUMERIC(18,2)` / `Decimal`,
+количества: `NUMERIC(20,6)`. PostgreSQL округляет ввод до масштаба этих колонок.
+Отрицательные значения, пустые ключи, дубликаты SKU и отсутствующие внешние
+ключи отклоняются ограничениями БД. Удаление товара каскадно удаляет его связи,
+цены и остатки; используемую характеристику удалить нельзя.
+
+Для каждой сущности доступны `create_*`, `get_*`, `list_*`, `update_*`, `delete_*`.
+Обновление заменяет все поля input; `get`/`update` возвращают `None`, если записи
+нет, `delete` — признак удаления. Списки отсортированы по id; limit ограничен
+1–1000, offset не меньше нуля. Все пользовательские значения передаются
+параметрами SQL. `add_category`, `remove_category`, `products_in_category`
+управляют связями. Миграции запускаются явно; HTTP-ручки не добавляются.
+
+```rust,no_run
+use repair_calc::storage::{CatalogStore, ProductInput};
+use rust_decimal::Decimal;
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
+let store = CatalogStore::connect(&std::env::var("DATABASE_URL")?).await?;
+store.migrate().await?;
+let product = store.create_product(&ProductInput {
+    sku: "paint-white-3l".into(), name: "Краска белая".into(),
+    description: String::new(), unit: "l".into(), package_quantity: Decimal::from(3),
+}).await?;
+assert!(store.get_product(product.id).await?.is_some());
+# Ok(())
+# }
+```
+
+Проверка миграций и CRUD на PostgreSQL (роль должна иметь `CREATEDB`):
+
+```sh
+DATABASE_URL='postgresql://vlm326@localhost/postgres?host=/run/postgresql' \
+  cargo test --test storage_integration -- --ignored
+```
+
+sqlx создаёт отдельную тестовую базу для каждого теста. Проверяются CRUD всех
+сущностей, связи, точность денег, ограничения и каскадное удаление.
+
+## Расчёт материалов
+
+`repair_calc::calculation` — чистый модуль без сети, БД и глобального состояния.
+Входные числа — `Decimal`; при JSON-обмене предпочтительны десятичные строки.
+Размеры задаются в метрах, площади — в м², запас — в процентах (`10` = 10%).
+Нормы расхода передаются вызывающим кодом по данным конкретного товара.
+
+- `net_area(length, width, openings)` вычитает площадь проёмов.
+- `paint(area, litres_per_m2, coats, purchase)` учитывает расход на слой и число слоёв.
+- `tiles(area, purchase)` подходит также для ламината с площадью покрытия упаковки.
+- `consumable(area, quantity_per_m2, purchase)` — клей, штукатурка, грунтовка и другие материалы.
+- `wallpaper(Wallpaper)` считает целые полотна по периметру и ширине рулона,
+  добавляет припуск к высоте и округляет длину полотна вверх до раппорта.
+  Число полотен из рулона округляется вниз. Проёмы не вычитаются;
+  поддерживается прямое совмещение рисунка, смещённое — не моделируется.
+
+Общая формула: `required = base × (1 + reserve / 100)`,
+`packages = ceil(required / package_quantity)`, `cost = packages × package_price`.
+Для обоев единица количества — полотно, упаковка — рулон; запас применяется
+к числу полотен. Результат содержит количество до/после запаса, целые упаковки,
+закупленное количество, излишек сверх запаса и стоимость, округлённую до двух
+знаков (половины вверх). Цена и результат должны относиться к одной валюте.
+Проверяются знаки, нулевые размеры упаковки/расхода, переполнение и рулоны,
+из которых нельзя вырезать полотно. Нулевая площадь даёт нулевую закупку.
+
+```rust
+use repair_calc::calculation::{paint, Purchase};
+use rust_decimal::Decimal;
+let estimate = paint(Decimal::from(40), "0.12".parse().unwrap(), 2, Purchase {
+    package_quantity: Decimal::from(3), package_price: "1499.99".parse().unwrap(),
+    reserve_percent: Decimal::from(10),
+}).unwrap();
+assert_eq!(estimate.packages, 4);
+assert_eq!(estimate.total_cost.to_string(), "5999.96");
+```
+
+Unit-тесты расчётов не требуют PostgreSQL: `cargo test --lib calculation`.
