@@ -75,6 +75,7 @@ function toggleCatalog() {
   $('#catalog-button').setAttribute('aria-expanded', String(!$('#catalog-menu').hidden));
 }
 function selectCategory(name = '') {
+  window.RepairCalculator?.close();
   state.category = name; state.query = ''; state.tab = 'all'; state.favoritesOnly = false;
   $('#search-input').value = ''; closeCatalog(); renderProducts();
   $('#products-section').scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -90,7 +91,7 @@ function showCart() {
   openDialog('Корзина', items.length ? items.map(p => `<div class="cart-row"><img src="assets/${p.image}.svg" alt=""><div><h3>${p.name}</h3><span>${money(p.price)} ₽</span></div><div class="quantity"><button data-quantity="${p.id}" data-delta="-1" aria-label="Уменьшить количество: ${p.name}">−</button><span>${state.cart[p.id]}</span><button data-quantity="${p.id}" data-delta="1" aria-label="Увеличить количество: ${p.name}">+</button></div></div>`).join('') + `<div class="cart-total"><span>Итого</span><span>${money(total)} ₽</span></div><p class="dialog-note">Это демонстрационная корзина. Оформление и оплата заказа пока не подключены.</p>` : '<p>В корзине пока пусто.</p><p class="dialog-note">Добавьте товары из каталога — они появятся здесь.</p>');
 }
 $('#categories').innerHTML = categories.map(c => `<button class="category" data-category="${c.name}"><img src="assets/${c.image}.svg" alt=""><strong>${c.name}</strong><small>${c.count}</small></button>`).join('');
-$('#catalog-links').innerHTML = categories.map(c => `<button data-category="${c.name}">${c.name} <span aria-hidden="true">→</span></button>`).join('');
+$('#catalog-links').innerHTML = categories.map(c => `<button data-category="${c.name}">${c.name} <span aria-hidden="true">→</span></button>`).join('') + '<button class="red" data-open-calculator>Калькулятор ремонта <span aria-hidden="true">→</span></button>';
 document.addEventListener('click', event => {
   const button = event.target.closest('button');
   if (button?.dataset.category) selectCategory(button.dataset.category);
@@ -122,15 +123,16 @@ document.addEventListener('click', event => {
   if (!event.target.closest('.header')) closeCatalog();
 });
 $('#catalog-button').addEventListener('click', toggleCatalog);
-$('#all-categories').addEventListener('click', () => { window.scrollTo({ top: 0, behavior: 'smooth' }); toggleCatalog(); });
+$('#all-categories').addEventListener('click', () => { window.RepairCalculator?.close(); window.scrollTo({ top: 0, behavior: 'smooth' }); toggleCatalog(); });
 $('#search-form').addEventListener('submit', event => {
-  event.preventDefault(); state.query = $('#search-input').value.trim(); state.category = ''; state.favoritesOnly = false; state.tab = 'all';
+  event.preventDefault(); window.RepairCalculator?.close(); state.query = $('#search-input').value.trim(); state.category = ''; state.favoritesOnly = false; state.tab = 'all';
   renderProducts(); $('#products-section').scrollIntoView({ behavior: 'smooth' });
 });
 $('#search-input').addEventListener('input', () => { if (!$('#search-input').value && state.query) { state.query = ''; renderProducts(); } });
 $('#reset-products').addEventListener('click', () => selectCategory());
 $('#clear-search').addEventListener('click', () => selectCategory());
 $('#favorites-button').addEventListener('click', () => {
+  window.RepairCalculator?.close();
   const next = !state.favoritesOnly;
   state.category = ''; state.query = ''; state.tab = 'all'; state.favoritesOnly = next; $('#search-input').value = '';
   renderProducts(); $('#products-section').scrollIntoView({ behavior: 'smooth' });
